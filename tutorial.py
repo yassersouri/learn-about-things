@@ -6,7 +6,7 @@ import click
 import matplotlib.pyplot as plt
 from matplotlib import animation
 
-seed = 14
+seed = 42
 np.random.seed(seed)
 tf.set_random_seed(seed)
 
@@ -43,7 +43,7 @@ class GeneratorDistribution(object):
         """
         Stratified sampling approach
         """
-        return np.linspace(-self.range, self.range, N) + np.random.random(N) * 0.1
+        return np.linspace(-self.range, self.range, N) + np.random.random(N) * 0.01
 
 
 def linear(input, output_dim, scope='linear', init_stddev=1.0, init_const=0.0):
@@ -165,7 +165,6 @@ class GAN(object):
         self.loss_g = tf.reduce_mean(-tf.log(self.D_gen))
 
         # partitioning the variables
-        trainable_variables = tf.trainable_variables()
         self.d_pre_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='D_pre')
         self.d_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Disc')
         self.g_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Gen')
