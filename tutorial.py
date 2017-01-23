@@ -126,11 +126,11 @@ class GAN(object):
         self.batch_size = batch_size
         self.minibatch = minibatch
         self.log_every = log_every
+        self.mlp_hidden_size = 4
         self.anim_path = anim_path
         self.anim_frames = []
 
-        self.mlp_hidden_size = 4
-
+        # can use a higher learning rate when not using the minibatch layer
         if self.minibatch:
             self.learning_rate = 0.005
         else:
@@ -139,88 +139,67 @@ class GAN(object):
         self._create_model()
 
     def _create_model(self):
-        # pretraining discriminator network
         with tf.variable_scope('D_pre'):
             self.pre_input = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
             self.pre_labels = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
-            self.D_pre = discriminator(self.pre_input, self.mlp_hidden_size, self.minibatch)
-            self.pre_loss = tf.reduce_mean(tf.square(self.D_pre - self.pre_labels))
-            self.pre_opt = optimizer(self.pre_loss, var_list=None, init_lr=self.learning_rate)
+            D_pre = discriminator(self.pre_input, self.mlp_hidden_size, self.minibatch)
+            self.pre_loss = tf.reduce_mean(tf.square(D_pre - self.pre_labels))
+            self.pre_opt = optimizer(self.pre_loss, None, self.learning_rate)
 
-        # generator network
-        with tf.variable_scope('Gen'):
+        with tf.variable_scope('G'):
             self.z = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
             self.G = generator(self.z, self.mlp_hidden_size)
 
-        # the discriminator network
-        # two graphs are created, 1: D(G(z)) and D(x)
-        with tf.variable_scope('Disc') as scope:
+        with tf.variable_scope('D') as scope:
             self.x = tf.placeholder(tf.float32, shape=(self.batch_size, 1))
-            self.D_data = discriminator(self.x, self.mlp_hidden_size, self.minibatch)
+            self.D1 = discriminator(self.x, self.mlp_hidden_size, self.minibatch)
             scope.reuse_variables()
-            self.D_gen = discriminator(self.G, self.mlp_hidden_size, self.minibatch)
+            self.D2 = discriminator(self.G, self.mlp_hidden_size, self.minibatch)
 
-        # defining the losses
-        self.loss_d = tf.reduce_mean(-tf.log(self.D_data) - tf.log(1 - self.D_gen))
-        self.loss_g = tf.reduce_mean(-tf.log(self.D_gen))
+        self.loss_d = tf.reduce_mean(-tf.log(self.D1) - tf.log(1 - self.D2))
+        self.loss_g = tf.reduce_mean(-tf.log(self.D2))
 
-        # partitioning the variables
-        self.d_pre_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='D_pre')
-        self.d_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Disc')
-        self.g_params = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Gen')
+        vars = tf.trainable_variables()
+        self.d_pre_params = [v for v in vars if v.name.startswith('D_pre/')]
+        self.d_params = [v for v in vars if v.name.startswith('D/')]
+        self.g_params = [v for v in vars if v.name.startswith('G/')]
 
-        # creating optimizers
         self.opt_d = optimizer(self.loss_d, self.d_params, self.learning_rate)
         self.opt_g = optimizer(self.loss_g, self.g_params, self.learning_rate)
-
-    def pretrain(self, session, num_pretrain_steps=1000):
-        self.pre_loss_vals = []
-        for step in xrange(num_pretrain_steps):
-            d = (np.random.random(self.batch_size) - 0.5) * 10.0  # ?
-            labels = scipy.stats.norm.pdf(d, loc=self.data.mu, scale=self.data.sigma)
-            pretrain_loss, _ = session.run([self.pre_loss, self.pre_opt], {
-                self.pre_input: np.reshape(d, (self.batch_size, 1)),
-                self.pre_labels: np.reshape(labels, (self.batch_size, 1))
-            })
-            self.pre_loss_vals.append(pretrain_loss)
-        self.weightsD = session.run(self.d_pre_params)
-
-    def copy_disc_weights_from_pretrained(self, session):
-        for i, v in enumerate(self.d_params):
-            session.run(v.assign(self.weightsD[i]))
 
     def train(self):
         with tf.Session() as session:
             tf.global_variables_initializer().run()
-            self.pretrain(session)
-            self.copy_disc_weights_from_pretrained(session)
+
+            num_pretrain_steps = 1000
+            for step in xrange(num_pretrain_steps):
+                d = (np.random.random(self.batch_size) - 0.5) * 10.0  # why not sample from data?
+                labels = scipy.stats.norm.pdf(d, loc=self.data.mu, scale=self.data.sigma)
+                pretrain_loss, _ = session.run([self.pre_loss, self.pre_opt], {
+                    self.pre_input: np.reshape(d, (self.batch_size, 1)),
+                    self.pre_labels: np.reshape(labels, (self.batch_size, 1))
+                })
+            self.weightsD = session.run(self.d_pre_params)
+
+            for i, v in enumerate(self.d_params):
+                session.run(v.assign(self.weightsD[i]))
 
             for step in xrange(self.num_steps):
                 x = self.data.sample(self.batch_size)
-                z = self.data.sample(self.batch_size)
-
-                # update discriminator
+                z = self.gen.sample(self.batch_size)
                 loss_d, _ = session.run([self.loss_d, self.opt_d], {
                     self.x: np.reshape(x, (self.batch_size, 1)),
                     self.z: np.reshape(z, (self.batch_size, 1))
                 })
 
-                # update generator
                 z = self.gen.sample(self.batch_size)
                 loss_g, _ = session.run([self.loss_g, self.opt_g], {
                     self.z: np.reshape(z, (self.batch_size, 1))
                 })
 
                 if step % self.log_every == 0:
-                    print '{}: {}\t{}'.format(step, loss_d, loss_g)
-
-                if self.anim_path:
-                    self.anim_frames.append(self._samples(session))
-
-            if self.anim_path:
-                self._save_animation()
-            else:
-                self._plot_distributions(session)
+                    print('{}: {}\t{}'.format(step, loss_d, loss_g))
+            self._plot_distributions(session)
 
     def _samples(self, session, num_points=10000, num_bins=100):
         '''
@@ -234,7 +213,7 @@ class GAN(object):
         # decision boundary
         db = np.zeros((num_points, 1))
         for i in range(num_points // self.batch_size):
-            db[self.batch_size * i:self.batch_size * (i + 1)] = session.run(self.D_data, {
+            db[self.batch_size * i:self.batch_size * (i + 1)] = session.run(self.D1, {
                 self.x: np.reshape(
                     xs[self.batch_size * i:self.batch_size * (i + 1)],
                     (self.batch_size, 1)
@@ -273,54 +252,6 @@ class GAN(object):
         plt.ylabel('Probability density')
         plt.legend()
         plt.show()
-
-    def _save_animation(self):
-        f, ax = plt.subplots(figsize=(6, 4))
-        f.suptitle('1D Generative Adversarial Network', fontsize=15)
-        plt.xlabel('Data values')
-        plt.ylabel('Probability density')
-        ax.set_xlim(-6, 6)
-        ax.set_ylim(0, 1.4)
-        line_db, = ax.plot([], [], label='decision boundary')
-        line_pd, = ax.plot([], [], label='real data')
-        line_pg, = ax.plot([], [], label='generated data')
-        frame_number = ax.text(
-            0.02,
-            0.95,
-            '',
-            horizontalalignment='left',
-            verticalalignment='top',
-            transform=ax.transAxes
-        )
-        ax.legend()
-
-        db, pd, _ = self.anim_frames[0]
-        db_x = np.linspace(-self.gen.range, self.gen.range, len(db))
-        p_x = np.linspace(-self.gen.range, self.gen.range, len(pd))
-
-        def init():
-            line_db.set_data([], [])
-            line_pd.set_data([], [])
-            line_pg.set_data([], [])
-            frame_number.set_text('')
-            return (line_db, line_pd, line_pg, frame_number)
-
-        def animate(i):
-            frame_number.set_text(
-                'Frame: {}/{}'.format(i, len(self.anim_frames))
-            )
-            db, pd, pg = self.anim_frames[i]
-            line_db.set_data(db_x, db)
-            line_pd.set_data(p_x, pd)
-            line_pg.set_data(p_x, pg)
-            return (line_db, line_pd, line_pg, frame_number)
-
-        anim = animation.FuncAnimation(
-            init_func=init,
-            frames=len(self.anim_frames),
-            blit=True
-        )
-        anim.save(self.anim_path, fps=30, extra_args=['-vcodec', 'libx264'])
 
 
 def main():
